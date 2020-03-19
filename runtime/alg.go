@@ -8,7 +8,6 @@ import "unsafe"
 * @Date: 2020/3/18 17:38
  */
 
-
 // typeAlg is also copied/used in reflect/type.go.
 // keep them in sync.
 type typeAlg struct {
