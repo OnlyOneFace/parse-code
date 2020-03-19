@@ -89,7 +89,6 @@ func growslice(et *_type, old slice, cap int) slice {
 	// 扩容机制：当旧容量<1024,每次扩容2倍，否则
 	newcap := old.cap
 	doublecap := newcap + newcap
-	// cap传入的值等于（旧数据的长度+新数据的长度）稍大的偶数
 	if cap > doublecap { // 传入的容量大于旧的容量的2倍，则扩容之后取传入的容量
 		newcap = cap
 	} else { // 不大于2倍的情况
