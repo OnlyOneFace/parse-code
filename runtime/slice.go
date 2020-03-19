@@ -77,7 +77,7 @@ func growslice(et *_type, old slice, cap int) slice {
 		msanread(old.array, uintptr(old.len*int(et.size)))
 	}
 
-	if cap < old.cap {
+	if cap < old.cap { // 新的容量不能小于旧的
 		panic(errorString("growslice: cap out of range"))
 	}
 
@@ -86,22 +86,23 @@ func growslice(et *_type, old slice, cap int) slice {
 		// We assume that append doesn't need to preserve old.array in this case.//append不应创建具有nil指针但长度非零的切片。在这种情况下，我们假设append不需要保留old.array
 		return slice{unsafe.Pointer(&zerobase), old.len, cap}
 	}
-	// 扩容机制
+	// 扩容机制：当旧容量<1024,每次扩容2倍，否则
 	newcap := old.cap
 	doublecap := newcap + newcap
-	if cap > doublecap { // 新的容量大于旧的容量的2倍，则扩容之后取新的容量
+	// cap传入的值等于（旧数据的长度+新数据的长度）稍大的偶数
+	if cap > doublecap { // 传入的容量大于旧的容量的2倍，则扩容之后取传入的容量
 		newcap = cap
 	} else { // 不大于2倍的情况
 		if old.len < 1024 {
 			newcap = doublecap
 		} else {
 			// Check 0 < newcap to detect overflow
-			// and prevent an infinite loop.
+			// and prevent an infinite loop. //检查0<newcap以检测溢出并防止无限循环,一次增加0.25
 			for 0 < newcap && newcap < cap {
 				newcap += newcap / 4
 			}
 			// Set newcap to the requested cap when
-			// the newcap calculation overflowed.
+			// the newcap calculation overflowed.//当newcap计算溢出时，将newcap设置为请求的cap。
 			if newcap <= 0 {
 				newcap = cap
 			}
@@ -113,7 +114,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	// Specialize for common values of et.size.
 	// For 1 we don't need any division/multiplication.
 	// For sys.PtrSize, compiler will optimize division/multiplication into a shift by a constant.
-	// For powers of 2, use a variable shift.
+	// For powers of 2, use a variable shift.//专门研究et.size的公共值。对于1，我们不需要任何除法/乘法。对于sys.PtrSize，编译器会将除法/乘法优化为按常量移位。对于2的幂，使用变量移位。
 	switch {
 	case et.size == 1:
 		lenmem = uintptr(old.len)
@@ -130,7 +131,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	case isPowerOfTwo(et.size):
 		var shift uintptr
 		if sys.PtrSize == 8 {
-			// Mask shift for better code generation.
+			// Mask shift for better code generation.//为了更好的代码生成，屏蔽移位。
 			shift = uintptr(sys.Ctz64(uint64(et.size))) & 63
 		} else {
 			shift = uintptr(sys.Ctz32(uint32(et.size))) & 31
@@ -143,7 +144,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	default:
 		lenmem = uintptr(old.len) * et.size
 		newlenmem = uintptr(cap) * et.size
-		capmem, overflow = math.MulUintptr(et.size, uintptr(newcap))
+		capmem, overflow = math2.MulUintptr(et.size, uintptr(newcap))
 		capmem = roundupsize(capmem)
 		newcap = int(capmem / et.size)
 	}
@@ -180,7 +181,73 @@ func growslice(et *_type, old slice, cap int) slice {
 			bulkBarrierPreWriteSrcOnly(uintptr(p), uintptr(old.array), lenmem)
 		}
 	}
-	memmove(p, old.array, lenmem)
+	memmove(p, old.array, lenmem) // 将老的数据copy到新的数组,用汇编写的
+	// 整个流程：1.判断是否合法传入的容量是否合法
+	//			2.根据传入的容量和旧容量计算出扩容后的新容量(扩容机制)
+	//			3.根据长度和新容量计算出需要分配的内存大小和拷贝的旧数据大小(涉及到新容量根据内存分布修正)
+	//			4.将旧数据拷贝到新的slice上
+	return slice{p, old.len, newcap} // 注意扩容后的数据长度和旧的数据长度一致
+}
 
-	return slice{p, old.len, newcap}
+func isPowerOfTwo(x uintptr) bool { // true时,x必为2的指数，即二进制数必须是1开头，其他全为0的数
+	return x&(x-1) == 0
+}
+
+// slicecopy slice的copy,width是growslice里的et.size
+func slicecopy(to, fm slice, width uintptr) int {
+	if fm.len == 0 || to.len == 0 {
+		return 0
+	}
+
+	n := fm.len
+	if to.len < n {
+		n = to.len
+	}
+
+	if width == 0 {
+		return n
+	}
+
+	if raceenabled {
+		callerpc := getcallerpc()
+		pc := funcPC(slicecopy)
+		racewriterangepc(to.array, uintptr(n*int(width)), callerpc, pc)
+		racereadrangepc(fm.array, uintptr(n*int(width)), callerpc, pc)
+	}
+	if msanenabled {
+		msanwrite(to.array, uintptr(n*int(width)))
+		msanread(fm.array, uintptr(n*int(width)))
+	}
+
+	size := uintptr(n) * width
+	if size == 1 { // common case worth about 2x to do here
+		// TODO: is this still worth it with new memmove impl?
+		*(*byte)(to.array) = *(*byte)(fm.array) // known to be a byte pointer//长度为1将新的slice的数组指针指向原先的数组
+	} else {
+		memmove(to.array, fm.array, size)
+	}
+	return n
+}
+
+func slicestringcopy(to []byte, fm string) int {
+	if len(fm) == 0 || len(to) == 0 {
+		return 0
+	}
+
+	n := len(fm)
+	if len(to) < n {
+		n = len(to)
+	}
+
+	if raceenabled {
+		callerpc := getcallerpc()
+		pc := funcPC(slicestringcopy)
+		racewriterangepc(unsafe.Pointer(&to[0]), uintptr(n), callerpc, pc)
+	}
+	if msanenabled {
+		msanwrite(unsafe.Pointer(&to[0]), uintptr(n))
+	}
+
+	memmove(unsafe.Pointer(&to[0]), stringStructOf(&fm).str, uintptr(n))
+	return n
 }
